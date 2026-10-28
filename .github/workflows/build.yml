@@ -1,0 +1,58 @@
+name: Build App Lock
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Works whether the project files were uploaded directly or as AppLock.zip.
+      - name: Unpack project if it was uploaded as a zip
+        run: |
+          if [ ! -f settings.gradle.kts ]; then
+            if [ -f AppLock.zip ]; then unzip -q -o AppLock.zip; fi
+            if [ -d AppLock ]; then shopt -s dotglob; cp -r AppLock/* .; fi
+          fi
+          chmod +x gradlew
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build the Play Store bundle (only when the signing key is set up)
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        env:
+          APPLOCK_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          APPLOCK_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          APPLOCK_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          APPLOCK_KEYSTORE="$RUNNER_TEMP/upload.jks" ./gradlew bundleRelease --stacktrace
+          cp app/build/outputs/bundle/release/app-release.aab AppLock-playstore.aab
+
+      - name: Publish the download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk AppLock.apk
+          FILES="AppLock.apk"
+          if [ -f AppLock-playstore.aab ]; then FILES="$FILES AppLock-playstore.aab"; fi
+          gh release create "build-${{ github.run_number }}" $FILES \
+            --repo "${{ github.repository }}" \
+            --title "App Lock build ${{ github.run_number }}" \
+            --notes "Download AppLock.apk on your phone and open it to install."
